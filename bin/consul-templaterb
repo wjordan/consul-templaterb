@@ -256,7 +256,7 @@ optparse = OptionParser.new do |opts|
             now = Time.now
             delay = sig_min_interval - (now - @programs[cmd].last_signal_sent)
             delay = 0 if delay.negative?
-            Async { sleep delay; process_to_reload.reload }
+            Async { |task| task.sleep delay; process_to_reload.reload }
           end
           begin
             process_to_reload.process_status
