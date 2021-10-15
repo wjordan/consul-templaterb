@@ -419,7 +419,7 @@ module Consul
             @net_info[:success] += 1
             @net_info[:bytes_read] += result.data.bytesize
             @net_info[:changes] += 1 if result.modified?
-            @net_info[:network_bytes] += result.http.response_header['Content-Length'].to_i
+            @net_info[:network_bytes] += result.http.response_header['content-length']&.first.to_i
           end
           tpl.endpoint.on_error do |_err|
             @net_info[:errors] = @net_info[:errors] + 1

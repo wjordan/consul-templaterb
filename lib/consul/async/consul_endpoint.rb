@@ -141,7 +141,9 @@ module Consul
     # It also stores x_consul_index and keep track on updates of API
     # So, it basically performs all the optimizations to keep updated with Consul internal state.
     class ConsulEndpoint
-      attr_reader :conf, :path, :x_consul_index, :stats, :last_result, :enforce_json_200, :start_time, :default_value, :query_params
+      # @return [ConsulConfiguration]
+      attr_reader :conf
+      attr_reader :path, :x_consul_index, :stats, :last_result, :enforce_json_200, :start_time, :default_value, :query_params
       def initialize(conf, path, enforce_json_200 = true, query_params = {}, default_value = '[]', agent = nil)
         @conf = conf.create(path, agent: agent)
         @default_value = default_value
@@ -220,8 +222,9 @@ module Consul
         res
       end
 
+      # @param [::Protocol::HTTP::Response] http
       def find_x_consul_index(http)
-        http.headers['X-Consul-Index']
+        http.headers['x-consul-index']&.first
       end
 
       def _compute_retry_in(retry_in)
@@ -271,31 +274,36 @@ module Consul
       def fetch(task)
         @task = task
         consul_index = @x_consul_index
+        options = {
+          connect_timeout: 5, # default connection setup timeout
+          inactivity_timeout: conf.wait_duration + 1 + (conf.wait_duration / 16) # default connection inactivity (post-setup) timeout
+        }
+        opts = build_request(consul_index)
+        uri = URI.parse(conf.base_url)
+        path = opts[:path]
+        path = "/#{path}" unless path.start_with?('/')
+        uri.path = path
+        uri.query = URI.encode_www_form(opts[:query].to_a)
+        i = ::Async::HTTP::Internet.instance
+        unless conf.tls_cert_chain.nil?
+          # @type [OpenSSL::SSL::SSLContext]
+          ssl = OpenSSL::SSL::SSLContext.new
+          ssl.key = OpenSSL::PKey.read(File.read(conf.tls_private_key))
+          ssl.cert = OpenSSL::X509::Certificate.new(File.read(conf.tls_cert_chain))
+          ssl.verify_mode = conf.tls_verify_peer ?
+                              OpenSSL::SSL::VERIFY_PEER :
+                              OpenSSL::SSL::VERIFY_NONE
+          i.client_for(::Async::HTTP::Endpoint.parse(uri, ssl_context: ssl))
+        end
+
         until @stopping
           begin
-            options = {
-              connect_timeout: 5, # default connection setup timeout
-              inactivity_timeout: conf.wait_duration + 1 + (conf.wait_duration / 16) # default connection inactivity (post-setup) timeout
-            }
-            unless conf.tls_cert_chain.nil?
-              options[:tls] = {
-                cert_chain_file: conf.tls_cert_chain,
-                private_key_file: conf.tls_private_key,
-                verify_peer: conf.tls_verify_peer
-              }
-            end
-            opts = build_request(consul_index)
-            uri = URI.parse(conf.base_url)
-            path = opts[:path]
-            path = "/#{path}" unless path.start_with?('/')
-            uri.path = path
-            uri.query = URI.encode_www_form(opts[:query].to_a)
             # @type [::Async::HTTP::Protocol::HTTP2::Response]
-            response = ::Async::HTTP::Internet.instance.call('GET', uri.to_s, opts[:head].transform_values(&:to_s))
+            response = i.call('GET', uri.to_s, opts[:head].transform_values(&:to_s))
 
             # Dirty hack, but contrary to other path, when key is not present, Consul returns 404
             is_kv_empty = path.start_with?('/v1/kv') && response.status == 404
-            if !is_kv_empty && enforce_json_200 && response.status != 200 && response.headers['Content-Type'] != 'application/json'
+            if !is_kv_empty && enforce_json_200 && response.status != 200 && response.headers['content-type']&.first != 'application/json'
               _handle_error(response, consul_index, nil) do
                 warn "[RETRY][#{path}] (#{@consecutive_errors} errors)" if (@consecutive_errors % 10) == 1
               end
