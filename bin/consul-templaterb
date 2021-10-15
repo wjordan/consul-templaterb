@@ -256,14 +256,13 @@ optparse = OptionParser.new do |opts|
             now = Time.now
             delay = sig_min_interval - (now - @programs[cmd].last_signal_sent)
             delay = 0 if delay.negative?
-            EventMachine.add_timer(delay) { process_to_reload.reload }
+            Async { sleep delay; process_to_reload.reload }
           end
           begin
             process_to_reload.process_status
           rescue Consul::Async::ProcessDoesNotExist => e
             warn "[FATAL] The process is dead, aborting run: #{e.inspect}"
             template_manager.terminate
-            EventMachine.stop
           end
         end
       end
@@ -323,7 +322,6 @@ optparse = OptionParser.new do |opts|
       if all_ready
         warn '[INFO] Program ends since daemon mode has been disabled, file(s) has been written'
         template_manager.terminate
-        EventMachine.stop
       end
     end
   end
@@ -339,29 +337,9 @@ end
 
 optparse.parse!
 
-# Find the max descriptors for our system
-def find_max_descriptors(max_descripors)
-  i = max_descripors
-  max_size = 1024
-  while i != max_size && i > 1024
-    max_size = EM.set_descriptor_table_size i
-    i /= 2 if max_size < i
-  end
-  max_size
-end
-
 %i[consul vault].each do |type|
   options[type][:base_url] = "http://#{options[type][:base_url]}" unless options[type][:base_url].start_with? 'http', 'https'
 end
-
-# Since we might be using a lots of descriptors, document this
-new_size = find_max_descriptors(65_536)
-warn "Max number of descriptors set to #{new_size}" if options[:consul][:debug][:network]
-
-# This is needed to avoid EM not to crash on some Linux Hosts
-# When using a very large number of Consul Endpoints
-# See https://github.com/eventmachine/eventmachine/issues/636#issuecomment-143313282
-EM.epoll
 
 # https://www.ruby-lang.org/en/news/2019/12/12/separation-of-positional-and-keyword-arguments-in-ruby-3-0/
 def ruby2_keywords(*); end if RUBY_VERSION < '2.7'

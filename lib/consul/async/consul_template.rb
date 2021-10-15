@@ -29,17 +29,17 @@ module Consul
         @endp_manager = endpoints_manager
       end
 
-      def as_json(url, default_value, refresh_delay_secs: 10, **opts)
-        conf = JSONConfiguration.new(url: url, min_duration: refresh_delay_secs, retry_on_non_diff: refresh_delay_secs, **opts)
-        endpoint_id = url + opts.hash.to_s
-        @endp_manager.create_if_missing(url, {}, endpoint_id: endpoint_id) do
-          if default_value.is_a?(Array)
-            ConsulTemplateJSONArray.new(JSONEndpoint.new(conf, url, default_value))
-          else
-            ConsulTemplateJSONObject.new(JSONEndpoint.new(conf, url, default_value))
-          end
-        end
-      end
+      # def as_json(url, default_value, refresh_delay_secs: 10, **opts)
+      #   conf = JSONConfiguration.new(url: url, min_duration: refresh_delay_secs, retry_on_non_diff: refresh_delay_secs, **opts)
+      #   endpoint_id = url + opts.hash.to_s
+      #   @endp_manager.create_if_missing(url, {}, endpoint_id: endpoint_id) do
+      #     if default_value.is_a?(Array)
+      #       ConsulTemplateJSONArray.new(JSONEndpoint.new(conf, url, default_value))
+      #     else
+      #       ConsulTemplateJSONObject.new(JSONEndpoint.new(conf, url, default_value))
+      #     end
+      #   end
+      # end
     end
 
     # Encapsulation of endpoints to get coordinates
@@ -97,6 +97,7 @@ module Consul
         @consul_conf = consul_configuration
         @vault_conf = vault_configuration
         @trim_mode = trim_mode
+        # @type [Hash{String =>ConsulTemplateAbstract}]
         @endpoints = {}
         @iteration = 1
         @start_time = Time.now.utc
@@ -309,7 +310,7 @@ module Consul
         nil
       end
 
-      def render(tpl, tpl_file_path, params = {}, current_template_info: nil)
+      def render(tpl, tpl_file_path, params = {}, current_template_info:)
         # Ugly, but allow to use render_file well to support stack of calls
         old_value = @context
         tpl_info = current_template_info.merge('source' => tpl_file_path.freeze)
@@ -337,14 +338,14 @@ module Consul
         not_ready = []
         ready = 0
         to_cleanup = []
-        @endpoints.each_pair do |endpoint_key, endpt|
-          if endpt.ready?
+        @endpoints.each_pair do |endpoint_key, endpoint|
+          if endpoint.ready?
             ready += 1
           else
             # We consider only the endpoints usefull with current iteration
-            not_ready << endpoint_key unless endpt.seen_at < @iteration
+            not_ready << endpoint_key unless endpoint.seen_at < @iteration
           end
-          to_cleanup << endpoint_key if (@iteration - endpt.seen_at) > 60
+          to_cleanup << endpoint_key if (@iteration - endpoint.seen_at) > 60
         end
         if not_ready.count.positive? || data.nil?
           if @iteration - @last_debug_time > 1
@@ -360,8 +361,7 @@ module Consul
         if to_cleanup.count > 1
           ::Consul::Async::Debug.puts_info "Cleaned up #{to_cleanup.count} endpoints: #{to_cleanup}"
           to_cleanup.each do |to_remove|
-            x = @endpoints.delete(to_remove)
-            x.endpoint.terminate
+            @endpoints.delete(to_remove)&.endpoint&.terminate
           end
         end
         if last_result != data
@@ -382,11 +382,14 @@ module Consul
       end
 
       def terminate
-        @running = false
-        @endpoints.each_value do |v|
-          v.endpoint.terminate
+        if @running
+          @running = false
+          @endpoints.each_value do |v|
+            v.endpoint.terminate
+          end
+          @endpoints.clear
         end
-        @endpoints = {}
+        ::Async::Task.current.stop
       end
 
       def vault_setup_token_renew
@@ -407,9 +410,11 @@ module Consul
                         end
         tpl = @endpoints[endpoint_id]
         unless tpl
+          # @type [ConsulTemplateAbstract]
           tpl = yield
           ::Consul::Async::Debug.print_debug "path #{path.ljust(64)} #{query_params.inspect}\r"
           @endpoints[endpoint_id] = tpl
+          # @type [ConsulResult] result
           tpl.endpoint.on_response do |result|
             @net_info[:success] += 1
             @net_info[:bytes_read] += result.data.bytesize
@@ -435,7 +440,13 @@ module Consul
 
     # Abstract class that stores information about a result
     class ConsulTemplateAbstract
-      attr_reader :result, :endpoint, :seen_at
+      # @return [ConsulResult] result
+      attr_reader :result
+      # @return [ConsulEndpoint]
+      attr_reader :endpoint
+      attr_reader :seen_at
+
+      # @param [ConsulEndpoint] consul_endpoint
       def initialize(consul_endpoint)
         @endpoint = consul_endpoint
         consul_endpoint.on_response do |res|

@@ -70,10 +70,6 @@ module Consul
       def json
         @json ||= JSON.parse(data)
       end
-
-      def next_retry_at
-        next_retry + last_update
-      end
     end
     # Encapsulation of HTTP Response
     class HttpResponse
@@ -174,11 +170,11 @@ module Consul
         retry_in = _compute_retry_in([600, conf.retry_duration + 2**@consecutive_errors].min)
         ::Consul::Async::Debug.puts_error "[#{url}] - #{http.error} - Retry in #{retry_in}s #{stats.body_bytes_human}"
         @consecutive_errors += 1
-        http_result = HttpResponse.new(http)
-        EventMachine.add_timer(retry_in) do
-          yield
-          queue.push(Object.new)
+        Async do |task|
+          task.sleep(retry_in)
+          fetch
         end
+        http_result = HttpResponse.new(http)
         @e_callbacks.each { |c| c.call(http_result) }
       end
 

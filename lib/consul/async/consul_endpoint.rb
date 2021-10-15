@@ -2,6 +2,10 @@ require 'consul/async/utilities'
 require 'consul/async/stats'
 require 'em-http'
 require 'json'
+require 'async'
+require 'async/http/internet/instance'
+require 'consul/async/debug'
+
 module Consul
   module Async
     # The class configuring Consul endpoints
@@ -87,7 +91,10 @@ module Consul
     # This keep track of answer from Consul
     # It also keep statistics about result (x_consul_index, stats...)
     class ConsulResult
-      attr_reader :data, :http, :x_consul_index, :last_update, :stats, :retry_in
+      attr_reader :data
+      # @return [HttpResponse]
+      attr_reader :http
+      attr_reader :x_consul_index, :last_update, :stats, :retry_in
       def initialize(data, modified, http, x_consul_index, stats, retry_in, fake: false)
         @data = data
         @modified = modified
@@ -116,37 +123,29 @@ module Consul
         @data_json = JSON.parse(data) if @data_json.nil?
         @data_json
       end
-
-      def next_retry_at
-        next_retry + last_update
-      end
     end
     # Basic Encapsulation of HTTP response from Consul
     # It supports empty responses to handle first call is an easy way
     class HttpResponse
       attr_reader :response_header, :response, :error
-      def initialize(http, override_nil_response = nil)
-        if http.nil?
-          @response_header = nil
-          @response = override_nil_response
-          @error = 'Not initialized yet'
-        else
-          @response_header = http.response_header.nil? ? nil : http.response_header.dup.freeze
-          @response = http.response.nil? || http.response.empty? ? override_nil_response : http.response.dup.freeze
-          @error = http.error.nil? ? nil : http.error.dup.freeze
-        end
+
+      # @param [Protocol::HTTP::Response, nil] http
+      # @param [Exception, nil] error
+      def initialize(http = nil, error = nil, override_nil_response = nil)
+        @response_header = http&.headers&.dup&.freeze
+        @response = http&.body? ? http&.body&.dup&.freeze : override_nil_response
+        @error = error&.dup&.freeze
       end
     end
     # This class represents a specific path in Consul HTTP API
     # It also stores x_consul_index and keep track on updates of API
     # So, it basically performs all the optimizations to keep updated with Consul internal state.
     class ConsulEndpoint
-      attr_reader :conf, :path, :x_consul_index, :queue, :stats, :last_result, :enforce_json_200, :start_time, :default_value, :query_params
+      attr_reader :conf, :path, :x_consul_index, :stats, :last_result, :enforce_json_200, :start_time, :default_value, :query_params
       def initialize(conf, path, enforce_json_200 = true, query_params = {}, default_value = '[]', agent = nil)
         @conf = conf.create(path, agent: agent)
         @default_value = default_value
         @path = path
-        @queue = EM::Queue.new
         @x_consul_index = 0
         @s_callbacks = []
         @e_callbacks = []
@@ -156,12 +155,11 @@ module Consul
         @query_params = query_params
         @stopping = false
         @stats = EndPointStats.new
-        @last_result = ConsulResult.new(default_value, false, HttpResponse.new(nil), 0, stats, 1, fake: true)
+        @last_result = ConsulResult.new(default_value, false, HttpResponse.new, 0, stats, 1, fake: true)
         on_response { |result| @stats.on_response result }
         on_error { |http| @stats.on_error http }
         _enable_network_debug if conf.debug && conf.debug[:network]
         fetch
-        queue << 0
       end
 
       def _enable_network_debug
@@ -173,7 +171,7 @@ module Consul
           "[#{stats.body_bytes_human.ljust(8)}][#{stats.bytes_per_sec_human.ljust(9)}]"\
           " #{path.ljust(48)} idx:#{result.x_consul_index}, next in #{result.retry_in} s"
         end
-        on_error { |http| warn "[ERROR]: #{path}: #{http.error.inspect}" }
+        on_error { |error| warn "[ERROR]: #{path}: #{error.inspect}" }
       end
 
       def on_response(&block)
@@ -218,7 +216,7 @@ module Consul
       end
 
       def find_x_consul_index(http)
-        http.response_header['X-Consul-Index']
+        http.headers['X-Consul-Index']
       end
 
       def _compute_retry_in(retry_in)
@@ -231,9 +229,11 @@ module Consul
       end
       # rubocop:enable Style/ClassVars
 
-      def _handle_error(http, consul_index)
+      # @param [Protocol::HTTP::Response, nil] response
+      # @param [Exception, nil] error
+      def _handle_error(response, consul_index, error = nil)
         retry_in = _compute_retry_in([600, conf.retry_duration + 2**@consecutive_errors].min)
-        if http.response_header.status == 429
+        if response&.status == 429
           _last_429
           retry_in = 60 + Consul::Async::Utilities.random.rand(180) if retry_in < 60
           _last_429[:time] = Time.now.utc
@@ -251,47 +251,52 @@ module Consul
             ::Consul::Async::Debug.puts_error "[#{path}] Too many conns to #{conf.base_url}, errors=#{_last_429[:count]} - Retry in #{retry_in}s #{stats.body_bytes_human}"
           end
         else
-          ::Consul::Async::Debug.puts_error "[#{path}] X-Consul-Index:#{consul_index} - #{http.error} - Retry in #{retry_in}s #{stats.body_bytes_human}"
+          ::Consul::Async::Debug.puts_error "[#{path}] X-Consul-Index:#{consul_index} - #{error} - Retry in #{retry_in}s #{stats.body_bytes_human}"
         end
         @consecutive_errors += 1
-        http_result = HttpResponse.new(http)
-        EventMachine.add_timer(retry_in) do
-          yield
-          queue.push(consul_index)
+
+        Async do
+          http_result = HttpResponse.new(response, error)
+          @e_callbacks.each { |c| c.call(http_result) }
         end
-        @e_callbacks.each { |c| c.call(http_result) }
+        ::Async::Task.current.sleep(retry_in)
+        yield
       end
 
       def fetch
-        options = {
-          connect_timeout: 5, # default connection setup timeout
-          inactivity_timeout: conf.wait_duration + 1 + (conf.wait_duration / 16) # default connection inactivity (post-setup) timeout
-        }
-        unless conf.tls_cert_chain.nil?
-          options[:tls] = {
-            cert_chain_file: conf.tls_cert_chain,
-            private_key_file: conf.tls_private_key,
-            verify_peer: conf.tls_verify_peer
-          }
-        end
-        connection = {
-          conn: EventMachine::HttpRequest.new(conf.base_url, options)
-        }
-        cb = proc do |consul_index|
-          http = connection[:conn].get(build_request(consul_index))
-          http.callback do
+        consul_index = @x_consul_index
+        until @stopping
+          begin
+            options = {
+              connect_timeout: 5, # default connection setup timeout
+              inactivity_timeout: conf.wait_duration + 1 + (conf.wait_duration / 16) # default connection inactivity (post-setup) timeout
+            }
+            unless conf.tls_cert_chain.nil?
+              options[:tls] = {
+                cert_chain_file: conf.tls_cert_chain,
+                private_key_file: conf.tls_private_key,
+                verify_peer: conf.tls_verify_peer
+              }
+            end
+            opts = build_request(consul_index)
+            uri = URI.parse(conf.base_url)
+            uri.path = "/#{opts[:path]}"
+            uri.query = URI.encode_www_form(opts[:query].to_a)
+            # @type [::Async::HTTP::Protocol::HTTP2::Response]
+            response = ::Async::HTTP::Internet.instance.call('GET', uri.to_s, opts[:head])
+
             # Dirty hack, but contrary to other path, when key is not present, Consul returns 404
-            is_kv_empty = path.start_with?('/v1/kv') && http.response_header.status == 404
-            if !is_kv_empty && enforce_json_200 && http.response_header.status != 200 && http.response_header['Content-Type'] != 'application/json'
-              _handle_error(http, consul_index) do
+            is_kv_empty = path.start_with?('/v1/kv') && response.status == 404
+            if !is_kv_empty && enforce_json_200 && response.status != 200 && response.headers['Content-Type'] != 'application/json'
+              _handle_error(response, consul_index, nil) do
                 warn "[RETRY][#{path}] (#{@consecutive_errors} errors)" if (@consecutive_errors % 10) == 1
               end
             else
-              n_consul_index = find_x_consul_index(http)
+              n_consul_index = find_x_consul_index(response)
               @x_consul_index = n_consul_index.to_i if n_consul_index
               @consecutive_errors = 0
               http_result = if is_kv_empty
-                              HttpResponse.new(http, default_value)
+                              HttpResponse.new(http, nil, default_value)
                             else
                               HttpResponse.new(http)
                             end
@@ -306,24 +311,21 @@ module Consul
               end
               retry_in = _compute_retry_in(retry_in)
               retry_in = 0.1 if retry_in < 0.1
-              unless @stopping
-                EventMachine.add_timer(retry_in) do
-                  queue.push(n_consul_index)
-                end
-              end
               result = ConsulResult.new(new_content, modified, http_result, n_consul_index, stats, retry_in, fake: false)
               @last_result = result
               @ready = true
-              @s_callbacks.each { |c| c.call(result) }
+              Async do
+                @s_callbacks.each { |c| c.call(result) }
+              end
+              consul_index = n_consul_index
+              ::Async::Task.current.sleep(retry_in) unless @stopping
             end
-          end
-
-          http.errback do
+          rescue StandardError => e
             unless @stopping
-              _handle_error(http, consul_index) do
+              _handle_error(response, consul_index, e) do
                 if (@consecutive_errors % 10) == 1
-                  add_msg = http.error
-                  if Gem.win_platform? && http.error.include?('unable to create new socket: Too many open files')
+                  add_msg = e
+                  if Gem.win_platform? && e.include?('unable to create new socket: Too many open files')
                     add_msg += "\n *** Windows does not support more than 2048 watches, watch less endpoints ***"
                   end
                   ::Consul::Async::Debug.puts_error "[RETRY][#{path}] (#{@consecutive_errors} errors) due to #{add_msg}"
@@ -331,9 +333,7 @@ module Consul
               end
             end
           end
-          queue.pop(&cb)
         end
-        queue.pop(&cb)
       end
     end
   end
