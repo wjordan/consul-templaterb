@@ -11,8 +11,13 @@ RSpec.describe Consul::Async::ConsulEndpoint do
   it 'returns the right json from the body of the http request' do
     path = 'v1/health/service/consul'
     results = mock_consul
-    Async { @endpoint = Consul::Async::ConsulEndpoint.new(@conf, path) }
-    expect(@endpoint.ready?).to be true
-    expect(@endpoint.last_result.data).to eq results[path]
+    Async do
+      @endpoint = Consul::Async::ConsulEndpoint.new(@conf, path)
+      @endpoint.on_response do
+        expect(@endpoint.ready?).to be true
+        expect(@endpoint.last_result.data).to eq results[path]
+        @endpoint.terminate
+      end
+    end
   end
 end

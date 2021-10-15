@@ -129,11 +129,11 @@ module Consul
     class HttpResponse
       attr_reader :response_header, :response, :error
 
-      # @param [Protocol::HTTP::Response, nil] http
+      # @param [Protocol::HTTP::Response, nil] response
       # @param [Exception, nil] error
-      def initialize(http = nil, error = nil, override_nil_response = nil)
-        @response_header = http&.headers&.dup&.freeze
-        @response = http&.body? ? http&.body&.dup&.freeze : override_nil_response
+      def initialize(response = nil, error = nil, override_nil_response = nil)
+        @response_header = response&.headers&.dup&.freeze
+        @response = response&.body? ? response&.body&.join&.freeze : override_nil_response
         @error = error&.dup&.freeze
       end
     end
@@ -159,7 +159,7 @@ module Consul
         on_response { |result| @stats.on_response result }
         on_error { |http| @stats.on_error http }
         _enable_network_debug if conf.debug && conf.debug[:network]
-        fetch
+        Async { |task| fetch(task) }
       end
 
       def _enable_network_debug
@@ -188,6 +188,7 @@ module Consul
 
       def terminate
         @stopping = true
+        @task&.stop
       end
 
       private
@@ -255,15 +256,16 @@ module Consul
         end
         @consecutive_errors += 1
 
-        Async do
+        @task.async do
           http_result = HttpResponse.new(response, error)
           @e_callbacks.each { |c| c.call(http_result) }
         end
-        ::Async::Task.current.sleep(retry_in)
+        @task.sleep(retry_in)
         yield
       end
 
-      def fetch
+      def fetch(task)
+        @task = task
         consul_index = @x_consul_index
         until @stopping
           begin
@@ -283,7 +285,7 @@ module Consul
             uri.path = "/#{opts[:path]}"
             uri.query = URI.encode_www_form(opts[:query].to_a)
             # @type [::Async::HTTP::Protocol::HTTP2::Response]
-            response = ::Async::HTTP::Internet.instance.call('GET', uri.to_s, opts[:head])
+            response = ::Async::HTTP::Internet.instance.call('GET', uri.to_s, opts[:head].transform_values(&:to_s))
 
             # Dirty hack, but contrary to other path, when key is not present, Consul returns 404
             is_kv_empty = path.start_with?('/v1/kv') && response.status == 404
@@ -296,9 +298,9 @@ module Consul
               @x_consul_index = n_consul_index.to_i if n_consul_index
               @consecutive_errors = 0
               http_result = if is_kv_empty
-                              HttpResponse.new(http, nil, default_value)
+                              HttpResponse.new(response, nil, default_value)
                             else
-                              HttpResponse.new(http)
+                              HttpResponse.new(response)
                             end
               new_content = http_result.response.freeze
               modified = @last_result.fake? || @last_result.data != new_content
@@ -314,11 +316,11 @@ module Consul
               result = ConsulResult.new(new_content, modified, http_result, n_consul_index, stats, retry_in, fake: false)
               @last_result = result
               @ready = true
-              Async do
+              @task.async do
                 @s_callbacks.each { |c| c.call(result) }
               end
               consul_index = n_consul_index
-              ::Async::Task.current.sleep(retry_in) unless @stopping
+              @task.sleep(retry_in) unless @stopping
             end
           rescue StandardError => e
             unless @stopping
