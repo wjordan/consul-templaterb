@@ -4,7 +4,6 @@ require 'consul/async/consul_endpoint'
 require 'consul/async/vault_endpoint'
 require 'consul/async/consul_template'
 require 'consul/async/consul_template_render'
-require 'em-http'
 require 'erb'
 module Consul
   module Async
@@ -46,6 +45,7 @@ module Consul
       end
 
       # Run templating engine once
+      # @param [Array<ConsulTemplateRender>] template_renders
       def do_run(template_manager, template_renders)
         unless template_manager.running
           ::Consul::Async::Debug.puts_info '[FATAL] TemplateManager has been stopped, stopping everything'
@@ -53,6 +53,8 @@ module Consul
           template_manager.terminate
           return
         end
+
+        # @type [ConsulTemplateRenderedResult]
         results = template_renders.map(&:run)
         all_ready = results.all?(&:ready?)
         if !@all_templates_rendered && all_ready
@@ -73,7 +75,7 @@ module Consul
         @result = 1
         template_manager.terminate
       rescue StandardError => e
-        warn "[FATAL] Error occured: #{e.inspect} - #{e.backtrace.join("\n\t")}"
+        warn "[FATAL] Error occurred: #{e.inspect} - #{e.backtrace.join("\n\t")}"
         @result = 2
         template_manager.terminate
       end
@@ -84,43 +86,42 @@ module Consul
 
         return if @all_templates_rendered || @periodic_started
 
+        ::Async::Task.current.yield
         # We continue if rendering not done and periodic not started
         do_run_fast(template_manager, template_renders)
       end
 
       def run(template_manager)
         @template_manager = template_manager
-        Async do
-          template_renders = @templates.map do |template_file, output_file, params|
-            Consul::Async::ConsulTemplateRender.new(
-              template_manager, template_file, output_file,
-              hot_reload_failure: hot_reload_failure,
-              params: params
-            )
-          end
-          # Initiate first run immediately to speed up rendering
-          do_run_fast(template_manager, template_renders)
-          Async do
-            loop do
-              @periodic_started = true
-              do_run(template_manager, template_renders)
-              if debug_memory
-                GC.start
-                new_memory_state = build_memory_info
-                diff_allocated = new_memory_state[:pages] - @last_memory_state[:pages]
-                diff_num_objects = new_memory_state[:objects] - @last_memory_state[:objects]
-                if diff_allocated != 0 || diff_num_objects.abs > (@last_memory_state[:pages] / 3)
-                  timediff = new_memory_state[:time] - @last_memory_state[:time]
-                  warn "[MEMORY] #{new_memory_state[:time]} significant RAM Usage detected\n" \
-                            "[MEMORY] #{new_memory_state[:time]} Pages  : #{new_memory_state[:pages]}" \
-                            " (diff #{diff_allocated} aka #{(diff_allocated / timediff).round(0)}/s) \n" \
-                            "[MEMORY] #{new_memory_state[:time]} Objects: #{new_memory_state[:objects]}"\
-                            " (diff #{diff_num_objects} aka #{(diff_num_objects / timediff).round(0)}/s)"
-                  @last_memory_state = new_memory_state
-                end
+        template_renders = @templates.map do |template_file, output_file, params|
+          Consul::Async::ConsulTemplateRender.new(
+            template_manager, template_file, output_file,
+            hot_reload_failure: hot_reload_failure,
+            params: params
+          )
+        end
+        # Initiate first run immediately to speed up rendering
+        do_run_fast(template_manager, template_renders)
+        Async do |task|
+          loop do
+            @periodic_started = true
+            do_run(template_manager, template_renders)
+            if debug_memory
+              GC.start
+              new_memory_state = build_memory_info
+              diff_allocated = new_memory_state[:pages] - @last_memory_state[:pages]
+              diff_num_objects = new_memory_state[:objects] - @last_memory_state[:objects]
+              if diff_allocated != 0 || diff_num_objects.abs > (@last_memory_state[:pages] / 3)
+                timediff = new_memory_state[:time] - @last_memory_state[:time]
+                warn "[MEMORY] #{new_memory_state[:time]} significant RAM Usage detected\n" \
+                          "[MEMORY] #{new_memory_state[:time]} Pages  : #{new_memory_state[:pages]}" \
+                          " (diff #{diff_allocated} aka #{(diff_allocated / timediff).round(0)}/s) \n" \
+                          "[MEMORY] #{new_memory_state[:time]} Objects: #{new_memory_state[:objects]}"\
+                          " (diff #{diff_num_objects} aka #{(diff_num_objects / timediff).round(0)}/s)"
+                @last_memory_state = new_memory_state
               end
-              sleep template_frequency
             end
+            task.sleep template_frequency
           end
         end
         @result

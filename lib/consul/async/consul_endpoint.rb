@@ -162,6 +162,10 @@ module Consul
         Async { |task| fetch(task) }
       end
 
+      def inspect
+        "<ConsulEndpoint:#{object_id} #{path} idx:#{x_consul_index}>"
+      end
+
       def _enable_network_debug
         on_response do |result|
           state = result.x_consul_index.to_i < 1 ? '[WARN]' : '[ OK ]'
@@ -282,7 +286,9 @@ module Consul
             end
             opts = build_request(consul_index)
             uri = URI.parse(conf.base_url)
-            uri.path = "/#{opts[:path]}"
+            path = opts[:path]
+            path = "/#{path}" unless path.start_with?('/')
+            uri.path = path
             uri.query = URI.encode_www_form(opts[:query].to_a)
             # @type [::Async::HTTP::Protocol::HTTP2::Response]
             response = ::Async::HTTP::Internet.instance.call('GET', uri.to_s, opts[:head].transform_values(&:to_s))

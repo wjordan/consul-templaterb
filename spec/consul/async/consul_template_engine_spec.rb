@@ -11,17 +11,23 @@ RSpec.describe Consul::Async::ConsulTemplateEngine do
 
   it 'Renders properly ha_proxy.cfg.erb' do
     mock_consul
-    EM.run_block do
+    Async do
       template_file = find_absolute_path('../../../../samples/ha_proxy.cfg.erb')
       output_file = 'out.txt'
-      template_manager = Consul::Async::EndPointsManager.new(@consul_conf, @vault_conf, [[template_file, output_file, {}]])
-      @renderer = Consul::Async::ConsulTemplateRender.new(template_manager, template_file, output_file)
-      @renderer.run
+
+      engine = Consul::Async::ConsulTemplateEngine.new
+      engine.add_template(template_file, output_file)
+      template_manager = Consul::Async::EndPointsManager.new(@consul_conf, @vault_conf, engine.templates)
+      engine.add_template_callback do |all_ready, _, _|
+        if all_ready
+          expect(File.read('out.txt')).to eq read 'samples/haproxy.cfg'
+          template_manager.terminate
+        end
+      end
+      engine.run(template_manager)
+    ensure
+      template_manager.terminate
     end
-    EM.run_block do
-      @renderer.run
-    end
-    expect(@renderer.render).to eq read 'samples/haproxy.cfg'
   end
 
   samples_path = File.expand_path('../../../samples', __dir__)

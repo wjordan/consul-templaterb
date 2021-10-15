@@ -342,7 +342,7 @@ module Consul
           if endpoint.ready?
             ready += 1
           else
-            # We consider only the endpoints usefull with current iteration
+            # We consider only the endpoints useful with current iteration
             not_ready << endpoint_key unless endpoint.seen_at < @iteration
           end
           to_cleanup << endpoint_key if (@iteration - endpoint.seen_at) > 60
@@ -375,7 +375,7 @@ module Consul
             end
             File.rename(tmp_file, file)
           rescue StandardError => e
-            ::Consul::Async::Debug.puts_error "Failed  writting #{Utilities.bytes_to_h data.bytesize} bytes to #{file}: #{e.class}, message: #{e.inspect}"
+            ::Consul::Async::Debug.puts_error "Failed writing #{Utilities.bytes_to_h data.bytesize} bytes to #{file}: #{e.class}, message: #{e.inspect}"
           end
         end
         [true, data != last_result, data]

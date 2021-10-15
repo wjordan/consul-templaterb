@@ -25,6 +25,7 @@ module Consul
     # information about whether the template did receive all data to be fully rendered
     class ConsulTemplateRender
       attr_reader :template_file, :output_file, :template_file_ctime, :hot_reload_failure, :params
+      # @param [EndPointsManager] template_manager
       def initialize(template_manager, template_file, output_file, hot_reload_failure: 'die', params: {})
         @hot_reload_failure = hot_reload_failure
         @template_file = template_file
