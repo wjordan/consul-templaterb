@@ -100,9 +100,9 @@ module Consul
             params: params
           )
         end
-        # Initiate first run immediately to speed up rendering
-        do_run_fast(template_manager, template_renders)
         Async do |task|
+          # Initiate first run immediately to speed up rendering
+          do_run_fast(template_manager, template_renders)
           loop do
             @periodic_started = true
             do_run(template_manager, template_renders)
