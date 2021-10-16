@@ -292,7 +292,7 @@ module Consul
           ssl.verify_mode = conf.tls_verify_peer ?
                               OpenSSL::SSL::VERIFY_PEER :
                               OpenSSL::SSL::VERIFY_NONE
-          i.client_for(::Async::HTTP::Endpoint.parse(uri, ssl_context: ssl))
+          i.client_for(::Async::HTTP::Endpoint.parse(uri.to_s, ssl_context: ssl))
         end
 
         until @stopping
