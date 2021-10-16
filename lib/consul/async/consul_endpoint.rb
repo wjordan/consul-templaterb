@@ -273,16 +273,10 @@ module Consul
       def fetch(task)
         @task = task
         consul_index = @x_consul_index
-        options = {
-          connect_timeout: 5, # default connection setup timeout
-          inactivity_timeout: conf.wait_duration + 1 + (conf.wait_duration / 16) # default connection inactivity (post-setup) timeout
-        }
-        opts = build_request(consul_index)
         uri = URI.parse(conf.base_url)
         path = opts[:path]
         path = "/#{path}" unless path.start_with?('/')
         uri.path = path
-        uri.query = URI.encode_www_form(opts[:query].to_a)
         i = ::Async::HTTP::Internet.instance
         unless conf.tls_cert_chain.nil?
           # @type [OpenSSL::SSL::SSLContext]
@@ -297,6 +291,8 @@ module Consul
 
         until @stopping
           begin
+            opts = build_request(consul_index)
+            uri.query = URI.encode_www_form(opts[:query].to_a)
             # @type [::Async::HTTP::Protocol::HTTP2::Response]
             response = i.call('GET', uri.to_s, opts[:head].transform_values(&:to_s))
 
