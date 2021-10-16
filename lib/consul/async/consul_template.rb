@@ -96,7 +96,7 @@ module Consul
         @consul_conf = consul_configuration
         @vault_conf = vault_configuration
         @trim_mode = trim_mode
-        # @type [Hash{String =>ConsulTemplateAbstract}]
+        # @type [Hash<ConsulTemplateAbstract>]
         @endpoints = {}
         @iteration = 1
         @start_time = Time.now.utc
@@ -126,6 +126,11 @@ module Consul
 
         # Setup token renewal
         vault_setup_token_renew unless @vault_conf.token.nil? || !@vault_conf.token_renew
+        @endpoint_update_callbacks = []
+      end
+
+      def endpoint_update_callback(&block)
+        @endpoint_update_callbacks << block
       end
 
       # https://www.consul.io/api/health.html#list-nodes-for-service
@@ -417,8 +422,11 @@ module Consul
           tpl.endpoint.on_response do |result|
             @net_info[:success] += 1
             @net_info[:bytes_read] += result.data.bytesize
-            @net_info[:changes] += 1 if result.modified?
             @net_info[:network_bytes] += result.http.response_header['content-length']&.first.to_i
+            if result.modified?
+              @net_info[:changes] += 1
+              @endpoint_update_callbacks.each { |cb| cb.call(@endpoints.values.all?(:ready?)) }
+            end
           end
           tpl.endpoint.on_error do |_err|
             @net_info[:errors] = @net_info[:errors] + 1

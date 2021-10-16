@@ -10,8 +10,6 @@ module Consul
     # The Engine keeps tracks of all templates, handle hot-reload of files if needed
     # as well as ticking the clock to compute state of templates periodically.
     class ConsulTemplateEngine
-      # @return [EndPointsManager]
-      attr_reader :template_manager
       attr_reader :hot_reload_failure, :template_frequency, :debug_memory, :result, :templates
       attr_writer :hot_reload_failure, :template_frequency, :debug_memory
       def initialize
@@ -45,6 +43,7 @@ module Consul
       end
 
       # Run templating engine once
+      # @param [EndPointsManager] template_manager
       # @param [Array<ConsulTemplateRender>] template_renders
       def do_run(template_manager, template_renders)
         unless template_manager.running
@@ -54,7 +53,7 @@ module Consul
           return
         end
 
-        # @type [ConsulTemplateRenderedResult]
+        # @type [Array<ConsulTemplateRenderedResult>]
         results = template_renders.map(&:run)
         all_ready = results.all?(&:ready?)
         if !@all_templates_rendered && all_ready
@@ -80,17 +79,7 @@ module Consul
         template_manager.terminate
       end
 
-      # Run template engine as fast as possible until first rendering occurs
-      def do_run_fast(template_manager, template_renders)
-        do_run(template_manager, template_renders)
-
-        return if @all_templates_rendered || @periodic_started
-
-        ::Async::Task.current.yield
-        # We continue if rendering not done and periodic not started
-        do_run_fast(template_manager, template_renders)
-      end
-
+      # @param [EndPointsManager] template_manager
       def run(template_manager)
         @template_manager = template_manager
         template_renders = @templates.map do |template_file, output_file, params|
@@ -100,12 +89,10 @@ module Consul
             params: params
           )
         end
-        Async do |task|
-          # Initiate first run immediately to speed up rendering
-          do_run_fast(template_manager, template_renders)
-          loop do
-            @periodic_started = true
-            do_run(template_manager, template_renders)
+        Async do
+          do_run(template_manager, template_renders)
+          template_manager.endpoint_update_callback do |all_ready|
+            do_run(template_manager, template_renders) if all_ready
             if debug_memory
               GC.start
               new_memory_state = build_memory_info
@@ -121,7 +108,6 @@ module Consul
                 @last_memory_state = new_memory_state
               end
             end
-            task.sleep template_frequency
           end
         end
         @result
