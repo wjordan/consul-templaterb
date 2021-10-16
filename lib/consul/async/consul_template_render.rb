@@ -1,5 +1,4 @@
 require 'consul/async/utilities'
-require 'em-http'
 require 'erb'
 module Consul
   module Async

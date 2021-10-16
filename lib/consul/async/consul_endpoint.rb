@@ -1,6 +1,5 @@
 require 'consul/async/utilities'
 require 'consul/async/stats'
-require 'em-http'
 require 'json'
 require 'async'
 require 'async/http/internet/instance'

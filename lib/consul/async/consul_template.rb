@@ -1,5 +1,4 @@
 require 'consul/async/utilities'
-require 'em-http'
 require 'forwardable'
 require 'erb'
 require 'digest'
