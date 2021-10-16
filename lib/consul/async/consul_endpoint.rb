@@ -274,6 +274,7 @@ module Consul
         @task = task
         consul_index = @x_consul_index
         uri = URI.parse(conf.base_url)
+        opts = build_request(consul_index)
         path = opts[:path]
         path = "/#{path}" unless path.start_with?('/')
         uri.path = path
