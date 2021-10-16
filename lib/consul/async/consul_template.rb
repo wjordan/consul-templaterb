@@ -425,7 +425,7 @@ module Consul
             @net_info[:network_bytes] += result.http.response_header['content-length']&.first.to_i
             if result.modified?
               @net_info[:changes] += 1
-              @endpoint_update_callbacks.each { |cb| cb.call(@endpoints.values.all?(:ready?)) }
+              @endpoint_update_callbacks.each { |cb| cb.call(@endpoints.values.all?(&:ready?)) }
             end
           end
           tpl.endpoint.on_error do |_err|
